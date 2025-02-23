@@ -1,0 +1,4 @@
+# 忽略文件夹
+/logs/
+/imgs
+__pycache__/
