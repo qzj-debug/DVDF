@@ -436,3 +436,4 @@ if __name__ == "__main__":
                 if args.save_model:
                     policy.save('{}/models/model'.format(outdir))
     writer.close()
+    
