@@ -82,7 +82,10 @@ if __name__ == "__main__":
     src_dataset = data_dict
     
     #load tar dataset
-    tar_env = gym.make(task + "-" + args.srctype + "-v2")
+    if args.srctype == "random-expert":
+        tar_env = gym.make(task + "-" + "random" + "-v2")
+    else:
+        tar_env = gym.make(task + "-" + args.srctype + "-v2")
     #random-expert需要特殊对待
     tar_dataset = d4rl.qlearning_dataset(tar_env)
     
