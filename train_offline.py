@@ -12,7 +12,8 @@ import json # in case the user want to modify the hyperparameters
 import d4rl # used to make offline environments for source domains
 import d4rl
 import algo.utils as utils
-
+import h5py
+from tqdm import tqdm
 from pathlib                              import Path
 from algo.call_algo                       import call_algo
 from dataset.call_dataset                 import call_tar_dataset
@@ -20,6 +21,13 @@ from envs.mujoco.call_mujoco_env          import call_mujoco_env
 from envs.adroit.call_adroit_env          import call_adroit_env
 from envs.antmaze.call_antmaze_env        import call_antmaze_env
 from envs.infos                           import get_normalized_score
+
+from gym.envs.mujoco.half_cheetah_v3    import  HalfCheetahEnv
+from gym.envs.mujoco.ant_v3             import  AntEnv
+from gym.envs.mujoco.walker2d_v3        import  Walker2dEnv
+from gym.envs.mujoco.hopper_v3          import  HopperEnv
+
+from gym.wrappers.time_limit            import  TimeLimit
 
 
 def eval_policy(policy, env, eval_episodes=10, eval_cnt=None):
@@ -41,16 +49,26 @@ def eval_policy(policy, env, eval_episodes=10, eval_cnt=None):
     return avg_reward
 
 
+def get_keys(h5file):
+    keys = []
+
+    def visitor(name, item):
+        if isinstance(item, h5py.Dataset):
+            keys.append(name)
+
+    h5file.visititems(visitor)
+    return keys
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dir", default="./logs")
     parser.add_argument("--policy", default="IQL", help='policy to use')
-    parser.add_argument("--env", default="ant")
+    parser.add_argument("--env", default="ant-kinematic")
     parser.add_argument('--srctype', default="random", help='dataset type used in the source domain') # only useful when source domain is offline
     # support dataset type:
     # source domain: all valid datasets from D4RL
     # target domain: random, medium, medium-expert, expert
-    parser.add_argument('--shift_level', default=0.1, help='the scale of the dynamics shift. Note that this value varies on different settins')
     parser.add_argument('--mode', default=0, type=int, help='the training mode, there are four types, 0: online-online, 1: offline-online, 2: online-offline, 3: offline-offline')
     parser.add_argument("--seed", default=100, type=int)
     parser.add_argument("--save_model", default=True, type=bool)        # Save model and optimizer parameters
@@ -74,7 +92,6 @@ if __name__ == "__main__":
         domain = 'antmaze'
     else:
         raise NotImplementedError
-    print(domain)
 
     call_env = {
         'mujoco': call_mujoco_env,
@@ -101,7 +118,24 @@ if __name__ == "__main__":
     else:
         src_env_name += '-' + args.srctype + '-v2'
     src_env = None
-    src_eval_env = gym.make(src_env_name)
+    
+    if "halfcheetah" in args.env:
+        src_env = HalfCheetahEnv
+    elif "hopper" in args.env:
+        src_env = HopperEnv
+    elif "walker2d" in args.env:
+        src_env = Walker2dEnv
+    elif "ant" in args.env:
+        src_env = AntEnv
+    else:
+        raise NotImplementedError
+    
+    src_eval_env = TimeLimit(
+                src_env(xml_file=f"{str(Path(__file__).parent.absolute())}/envs/mujoco/assets/{args.env.replace('-', '_')}.xml",),
+                max_episode_steps=1000          
+            )
+    
+    
     src_eval_env.seed(args.seed)
     
     policy_config_name = 'igdf'
@@ -121,7 +155,7 @@ if __name__ == "__main__":
     print("------------------------------------------------------------")
     
     #outdir = args.dir + '/' + args.policy + '/' + args.env + '-' + args.srctype + '-' + str(args.seed)
-    outdir = args.dir + '/' + 'offline' + '/' + args.env + '-' + args.srctype + '-' + str(args.seed)
+    outdir = args.dir + '/' + 'Offline' + '/' + args.env + '/' + args.srctype + '/' + str(args.seed)
     
     if args.save_model and not os.path.exists("{}/models".format(outdir)):
         os.makedirs("{}/models".format(outdir))
@@ -156,15 +190,24 @@ if __name__ == "__main__":
     algo = IQL
     policy = algo(config, device)
     
-    
     ## write logs to record training parameters
     with open(outdir + '/log.txt','w') as f:
         f.write('\n Policy: {}; Dataset: {}, seed: {}'.format(args.policy, args.env + '-' + args.srctype, args.seed))
         for item in config.items():
             f.write('\n {}'.format(item))
+            
+    src_dataset_path = f"{str(Path(__file__).parent.absolute())}/dataset/source/{args.env}-{args.srctype}.hdf5"
+    data_dict = {}
+    with h5py.File(src_dataset_path, 'r') as dataset_file:
+        for k in tqdm(get_keys(dataset_file), desc="load datafile"):
+            try:  # first try loading as an array
+                data_dict[k] = dataset_file[k][:]
+            except ValueError as e:  # try loading as a scalar
+                data_dict[k] = dataset_file[k][()]
+    src_dataset = data_dict
 
     src_replay_buffer = utils.ReplayBuffer(state_dim, action_dim, device)
-    src_replay_buffer.convert_D4RL(d4rl.qlearning_dataset(src_eval_env))
+    src_replay_buffer.convert_D4RL(src_dataset)
     if 'antmaze' in args.env:
         src_replay_buffer.reward -= 1.0
 
@@ -180,12 +223,13 @@ if __name__ == "__main__":
         if (t + 1) % config['eval_freq'] == 0:
             src_eval_return = eval_policy(policy, src_eval_env, eval_cnt=eval_cnt)
             #writer.add_scalar('test/source return', src_eval_return, global_step = t+1)
-            print(f"Step: {t}  Score: {src_eval_env.get_normalized_score(src_eval_return)*100}")
+            print(f"Step: {t}  Return: {src_eval_return}")
             
             with open(outdir + '/return.txt', 'a') as f:
-                f.write(f"{t}  {src_eval_env.get_normalized_score(src_eval_return)*100} \n")
+                f.write(f"{t}  {src_eval_return} \n")
                 
             eval_cnt += 1
 
             if args.save_model:
                 policy.save('{}/models/model'.format(outdir))
+                
