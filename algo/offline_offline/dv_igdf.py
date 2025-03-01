@@ -250,7 +250,7 @@ class ContrastiveInfo(nn.Module):
         if return_repr:
             return self.combine_repr(sa_repr, ss_repr), sa_repr, ss_repr
         else:
-            return self.combine_repr(sa_repr, ss_repr)           #   [E, B1, B2]
+            return self.combine_repr(sa_repr, ss_repr)           #   [E, B1, B2] 就是输出的h值。B1是(s,a)，B2是s^\prime
 
 
 class TanhTransform(Transform):
@@ -362,7 +362,7 @@ def asymmetric_l2_loss(u: torch.Tensor, tau: float) -> torch.Tensor:
     return torch.mean(torch.abs(tau - (u < 0).float()) * u**2)
 
 
-class IGDF(object):
+class DV_IGDF(object):
 
     def __init__(self,
                  config,
@@ -375,6 +375,12 @@ class IGDF(object):
         self.tau = config['tau']
         self.target_entropy = target_entropy if target_entropy else -config['action_dim']
         self.update_interval = config['update_interval']
+        
+        #load src_Q, src_V
+        self.src_Q = DoubleQFunc(config['state_dim'], config['action_dim'], hidden_size=config['hidden_sizes']).to(self.device)
+        self.src_V = ValueFunc(config['state_dim'], config['action_dim'], hidden_size=config['hidden_sizes']).to(self.device)
+        self.src_Q.load_state_dict(torch.load(self.config["src_Q_path"], map_location=self.device))
+        self.src_V.load_state_dict(torch.load(self.config["src_V_path"], map_location=self.device))
 
         # IQL hyperparameter
         self.lam = config['lam']
@@ -415,7 +421,7 @@ class IGDF(object):
         else:
             return action.squeeze().cpu().numpy()
     
-    def update_info(self, src_replay_buffer, tar_replay_buffer, batch_size, writer=None):
+    def update_info(self, src_replay_buffer, tar_replay_buffer, batch_size, writer=None): #h函数更新逻辑
 
         info_step = 0
 
@@ -430,13 +436,15 @@ class IGDF(object):
             src_ss = src_ss.unsqueeze(0) # [1, 127, state_dim]
             src_ss = src_ss.expand(batch_size, -1, -1) # [128, 127, state_dim]
             ss = torch.cat((tar_ss, src_ss), dim = 1) # [128, 128, state_dim]
+            #对于128个tar样本中的每一个，第二维的128是自己和128个src样本concat起来，用于对比学习
+
 
             logits = self.info(tar_s, tar_a, ss) # [128, 1, 128]
-            logits = logits.squeeze(1)
+            logits = logits.squeeze(1) # [128, 128] 128个tar样本，每个和自己的ss以及127个src的ss的h值
             matrix = torch.zeros((batch_size, batch_size), dtype = torch.float32, device = self.device)
-            matrix[:, 0] = 1
+            matrix[:, 0] = 1 #第一列是1，其余是0，因为只需要把自己那项放到分子
             
-            info_loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, matrix)
+            info_loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, matrix) #交叉熵损失，就是对比损失
             info_loss = torch.mean(info_loss)
 
             if writer is not None and info_step % 100 == 0:
@@ -478,7 +486,7 @@ class IGDF(object):
         loss = (mask * (q_1 - value_target)**2).mean() + (mask * (q_2 - value_target)**2).mean()
         return loss
 
-    def update_policy(self, advantage_batch, state_batch, action_batch):
+    def update_policy(self, advantage_batch, state_batch, action_batch): #IQL的loss
         exp_adv = torch.exp(self.temp * advantage_batch.detach()).clamp(max=100.0)
         bc_loss = self.policy.bc_loss(state_batch, action_batch)
         policy_loss = torch.mean(exp_adv * bc_loss)
@@ -493,29 +501,40 @@ class IGDF(object):
 
         # perform data filtering
         if self.config['repr_norm']:
-            logits = self.info(src_state, src_action, src_next_state)
-            diagonal_elements = torch.diag(logits).reshape(-1, 1)
+            logits = self.info(src_state, src_action, src_next_state) # [batch, batch]
+            diagonal_elements = torch.diag(logits).reshape(-1, 1) # [batch, 1]
             src_info = diagonal_elements
-        else:
+        else:#归一化到[0,1]
             logits, srcsa_repr, srcss_repr = self.info(src_state, src_action, src_next_state, return_repr = True)
             srcsa_repr = torch.linalg.norm(srcsa_repr, dim=-1, keepdim=True)  # [128, 1]
             srcss_repr = torch.linalg.norm(srcss_repr, dim=-1, keepdim=True)  # [128, 1]
             diagonal_elements = torch.diag(logits).reshape(-1, 1)
             src_info = diagonal_elements / (srcsa_repr * srcss_repr) # [128, 1]
-        sorted_indices = torch.argsort(src_info[:, 0])
+            
+        q1, q2 = self.src_Q(src_state, src_action)
+        q = torch.min(q1, q2)
+        
+        src_adv = torch.exp(q - self.src_V(src_state))    # [batch, 1]
+        src_adv = src_adv / torch.linalg.norm(src_adv, dim=0, keepdim=True) #归一化，[batch, 1]
+        
+        filter_info = self.config["filter_alpha"] * src_info + (1 - self.config["filter_alpha"]) * src_adv
+        
+        sorted_indices = torch.argsort(filter_info[:, 0])
+        
+        #需要在这里进行改动，不仅根据src_info排序，还要根据advantage进行排序
 
         sorted_num = - int(batch_size * float(self.config['xi']))
-        top_half_indices = sorted_indices[sorted_num:]
+        top_half_indices = sorted_indices[sorted_num:] #取h最大的num个src样本
         src_state = src_state[top_half_indices]
         src_action = src_action[top_half_indices]
         src_next_state = src_next_state[top_half_indices]
         src_reward = src_reward[top_half_indices]
         src_not_done = src_not_done[top_half_indices]
 
-        info_temp = torch.exp(src_info[top_half_indices] * self.config['importance_weight'])
+        info_temp = torch.exp(src_info[top_half_indices] * self.config['importance_weight']) #加一个权重
 
-        mask = torch.ones((batch_size - sorted_num, 1)).to(self.device)
-        mask[:-sorted_num] = info_temp
+        mask = torch.ones((batch_size - sorted_num, 1)).to(self.device) #e.g. 128 + 32
+        mask[:-sorted_num] = info_temp #src用加权，tar权重为1
 
         state = torch.cat([src_state, tar_state], 0)
         action = torch.cat([src_action, tar_action], 0)

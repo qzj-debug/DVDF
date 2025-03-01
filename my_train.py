@@ -47,16 +47,17 @@ def get_keys(h5file):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dir", default="./logs")
-    parser.add_argument("--algo", default="IGDF", help='policy to use')
+    parser.add_argument("--algo", default="DV_IGDF", help='policy to use')
     parser.add_argument("--env", default="halfcheetah-kinematic") # support 
     parser.add_argument('--srctype', default="medium", help='dataset type used in the source domain') # only useful when source domain is offline
-    parser.add_argument("--seed", default=0, type=int)
+    parser.add_argument("--seed", default=100, type=int)
     parser.add_argument("--save-model", default=True, type=bool)        # Save model and optimizer parameters
     parser.add_argument('--tar_env_interact_interval', help='interval of interacting with target env', default=10, type=int)
     parser.add_argument('--max_step', default=int(1e6), type=int)  # the maximum gradient step for off-dynamics rl learning
     parser.add_argument('--limited_size', default=False, type=bool)
     parser.add_argument('--params', default=None, help='Hyperparameters for the adopted algorithm, ought to be in JSON format')
-    parser.add_argument('--device', default="cuda:1", type=str)
+    parser.add_argument('--device', default="cuda:0", type=str)
+    parser.add_argument('--filter_alpha', default=0.8, type=float)
     args = parser.parse_args()
     
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
@@ -115,6 +116,13 @@ if __name__ == "__main__":
         override_params = json.loads(args.params)
         config.update(override_params)
         print('The following parameters are updated to:', args.params)
+        
+    #这里加入filter_alpha和src_Q_path, src_V_path
+    config["filter_alpha"] = args.filter_alpha
+    config["src_Q_path"] = f"{str(Path(__file__).parent.absolute())}/logs/Offline/{args.env}/{args.srctype}/{args.seed}/models/model_critic"
+    config["src_V_path"] = f"{str(Path(__file__).parent.absolute())}/logs/Offline/{args.env}/{args.srctype}/{args.seed}/models/model_value"
+    #self.q_funcs.load_state_dict(torch.load(filename + "_critic"))
+    
 
     print("------------------------------------------------------------")
     print("Policy: {}, Env: {}, Seed: {}".format(args.algo, args.env + "-" + args.srctype, args.seed))
