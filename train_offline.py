@@ -1,3 +1,4 @@
+#主要是用IQL在src dataset上预训练得到Q和V
 import numpy as np
 import torch
 import gym
@@ -130,13 +131,42 @@ if __name__ == "__main__":
     else:
         raise NotImplementedError
     
-    src_eval_env = TimeLimit(
-                src_env(xml_file=f"{str(Path(__file__).parent.absolute())}/envs/mujoco/assets/{args.env.replace('-', '_')}.xml",),
-                max_episode_steps=1000          
-            )
+    #load env and dataset
+    if args.env in ["halfcheetah", "hopper", "walker2d", "ant"]:
+        src_eval_env = gym.make(args.env + "-" + args.srctype + "-v2")
+        src_eval_env.seed(args.seed)
+        src_dataset = d4rl.qlearning_dataset(src_eval_env)
+        
+        size = int(src_dataset["observations"].shape[0] * 0.1)
+
+        ind = np.random.randint(0, src_dataset["observations"].shape[0], size=size)
+    
+        src_dataset = {
+            "observations": src_dataset['observations'][ind],
+            "actions": src_dataset['actions'][ind],
+            "next_observations": src_dataset['next_observations'][ind],
+            "rewards": src_dataset['rewards'][ind],
+            "terminals": src_dataset['terminals'][ind],
+        }
+        
+    else:
+        src_eval_env = TimeLimit(
+                    src_env(xml_file=f"{str(Path(__file__).parent.absolute())}/envs/mujoco/assets/{args.env.replace('-', '_')}.xml",),
+                    max_episode_steps=1000          
+                )
+        src_eval_env.seed(args.seed)
+        
+        src_dataset_path = f"{str(Path(__file__).parent.absolute())}/dataset/source/{args.env}-{args.srctype}.hdf5"
+        data_dict = {}
+        with h5py.File(src_dataset_path, 'r') as dataset_file:
+            for k in tqdm(get_keys(dataset_file), desc="load datafile"):
+                try:  # first try loading as an array
+                    data_dict[k] = dataset_file[k][:]
+                except ValueError as e:  # try loading as a scalar
+                    data_dict[k] = dataset_file[k][()]
+        src_dataset = data_dict
     
     
-    src_eval_env.seed(args.seed)
     
     policy_config_name = 'igdf'
 
@@ -196,15 +226,7 @@ if __name__ == "__main__":
         for item in config.items():
             f.write('\n {}'.format(item))
             
-    src_dataset_path = f"{str(Path(__file__).parent.absolute())}/dataset/source/{args.env}-{args.srctype}.hdf5"
-    data_dict = {}
-    with h5py.File(src_dataset_path, 'r') as dataset_file:
-        for k in tqdm(get_keys(dataset_file), desc="load datafile"):
-            try:  # first try loading as an array
-                data_dict[k] = dataset_file[k][:]
-            except ValueError as e:  # try loading as a scalar
-                data_dict[k] = dataset_file[k][()]
-    src_dataset = data_dict
+
 
     src_replay_buffer = utils.ReplayBuffer(state_dim, action_dim, device)
     src_replay_buffer.convert_D4RL(src_dataset)
@@ -221,7 +243,12 @@ if __name__ == "__main__":
         policy.train(src_replay_buffer, config['batch_size'], writer=None)
 
         if (t + 1) % config['eval_freq'] == 0:
-            src_eval_return = eval_policy(policy, src_eval_env, eval_cnt=eval_cnt)
+            
+            if args.env in ["halfcheetah", "hopper", "walker2d", "ant"]:
+                src_eval_return = eval_policy(policy, src_eval_env, eval_cnt=eval_cnt)
+                src_eval_return = src_eval_env.get_normalized_score(src_eval_return)
+            else:
+                src_eval_return = eval_policy(policy, src_eval_env, eval_cnt=eval_cnt)
             #writer.add_scalar('test/source return', src_eval_return, global_step = t+1)
             print(f"Step: {t}  Return: {src_eval_return}")
             
