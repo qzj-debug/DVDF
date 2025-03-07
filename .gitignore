@@ -1,5 +1,5 @@
 # 忽略文件夹
-/logs/
+/*logs/
 /imgs
 __pycache__/
 *.hdf5

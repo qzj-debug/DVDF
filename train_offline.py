@@ -185,7 +185,7 @@ if __name__ == "__main__":
     print("------------------------------------------------------------")
     
     #outdir = args.dir + '/' + args.policy + '/' + args.env + '-' + args.srctype + '-' + str(args.seed)
-    outdir = args.dir + '/' + 'Offline' + '/' + args.env + '/' + args.srctype + '/' + str(args.seed)
+    outdir = args.dir + '/' + args.env + '/' + args.srctype + '/' + str(args.seed)
     
     if args.save_model and not os.path.exists("{}/models".format(outdir)):
         os.makedirs("{}/models".format(outdir))
