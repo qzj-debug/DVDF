@@ -8,7 +8,7 @@ import torch
 import numpy as np
 from torch.nn import functional as F
 from torch.distributions import Normal, kl_divergence
-
+from torch import Tensor
 
 class ReplayBuffer(object):
     def __init__(self, state_dim, action_dim, device, max_size=int(1e6)):
@@ -244,3 +244,58 @@ class ParallelizedEnsembleFlattenMLP(nn.Module):
         preds_sample = preds[sample_idxs]
         
         return torch.min(preds_sample, dim=0)[0], sample_idxs
+
+
+def test_mc(env, actor, device):
+    eval_env = env
+    state, done, iter = eval_env.reset(), False, 0
+
+    rewards = []
+    states = []
+    actions = []
+
+    final_states = []
+    final_actions = []
+    final_rewards = []
+    n_mc_cutoff = 350
+    while not done:
+        action = actor.act(state, device)
+        next_state, reward, done, _ = eval_env.step(action)
+        rewards.append(reward)
+        states.append(state)
+        actions.append(action)
+
+        iter += 1
+        state = next_state
+        if iter > 10000:
+            break
+        if done:
+            for i in reversed(range(len(rewards) - 1)):
+                rewards[i] = 0.99 * rewards[i + 1] + rewards[i]
+            final_rewards = np.concatenate((final_rewards, rewards[:n_mc_cutoff]))
+            final_states = final_states + states[:n_mc_cutoff]
+            final_actions = final_actions + actions[:n_mc_cutoff]
+            state, done = eval_env.reset(), False
+
+            rewards = []
+            states = []
+            actions = []
+            # print('reset', iter)
+    return final_rewards, np.array(final_states), np.array(final_actions)
+
+def log_q_bias_evaluation(env, agent, device):
+    final_mc_list, final_obs_list, final_act_list = test_mc(env, agent.actor, device)
+    obs_tensor = Tensor(final_obs_list).to(device)
+    acts_tensor = Tensor(final_act_list).to(device)
+    with torch.no_grad():
+        q_prediction = agent.critic_1(obs_tensor, acts_tensor).cpu().numpy().reshape(-1)
+    bias = q_prediction - final_mc_list
+    final_mc_list_normalize_base = final_mc_list.copy()
+    final_mc_list_normalize_base = np.abs(final_mc_list_normalize_base)
+    final_mc_list_normalize_base[final_mc_list_normalize_base < 10] = 10
+    normalized_bias_per_state = bias / final_mc_list_normalize_base
+    
+    return np.mean(normalized_bias_per_state)
+
+
+
