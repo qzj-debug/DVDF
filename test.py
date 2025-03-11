@@ -1,49 +1,166 @@
-import gym
-import d4rl
+#探究对dynamics shift的抵抗能力，用在clean环境上训练的IQL加入dynamics shift测试鲁棒性。
 import numpy as np
-import matplotlib.pyplot as plt
+import torch
+import gym
+import argparse
+import os
+import random
+import math
+import time
+import copy
+import yaml
+import json # in case the user want to modify the hyperparameters
+import d4rl # used to make offline environments for source domains
+import d4rl
+import algo.utils as utils
+import h5py
+from tqdm import tqdm
+from pathlib                              import Path
+from algo.call_algo                       import call_algo
+from dataset.call_dataset                 import call_tar_dataset
+from envs.mujoco.call_mujoco_env          import call_mujoco_env
+from envs.adroit.call_adroit_env          import call_adroit_env
+from envs.antmaze.call_antmaze_env        import call_antmaze_env
+from envs.infos                           import get_normalized_score
 
-# 创建环境
-env = gym.make('antmaze-large-diverse-v0')
+from gym.envs.mujoco.half_cheetah_v3    import  HalfCheetahEnv
+from gym.envs.mujoco.ant_v3             import  AntEnv
+from gym.envs.mujoco.walker2d_v3        import  Walker2dEnv
+from gym.envs.mujoco.hopper_v3          import  HopperEnv
 
-# 重置环境
-env.reset()
+from gym.wrappers.time_limit            import  TimeLimit
 
-# 获取当前环境的模拟器对象
-sim = env.unwrapped.sim
 
-# 初始化渲染器（使用无头模式）
-viewer = env.unwrapped._get_viewer(mode='rgb_array')
+def eval_policy(policy, env, eval_episodes=10, eval_cnt=None):
+    eval_env = env
 
-focus = {
-    "antmaze-umaze-v0": [3.9,3.9,1],
-    "antmaze-medium-diverse-v0": [10,10,1],
-    "antmaze-large-diverse-v0": [18,12,1]
-}
+    avg_reward = 0.
+    for episode_idx in range(eval_episodes):
+        state, done = eval_env.reset(), False
+        while not done:
+            action = policy.select_action(np.array(state))
+            next_state, reward, done, _ = eval_env.step(action)
 
-distance = {
-    "antmaze-umaze-v0": 28.0,
-    "antmaze-medium-diverse-v0": 45.0,
-    "antmaze-large-diverse-v0": 65.0
-}
+            avg_reward += reward
+            state = next_state
+    avg_reward /= eval_episodes
 
-# 设置相机参数
-viewer.cam.distance = 65.0  # 增加相机距离以覆盖整个迷宫
-viewer.cam.elevation = -90  # 俯视角度
-viewer.cam.azimuth = 90     # 水平旋转角度
+    print("[{}] Evaluation over {} episodes: {}".format(eval_cnt, eval_episodes, avg_reward))
 
-viewer.cam.lookat[:] = [18,12,1]  # 设置相机焦点
+    return avg_reward
 
-# 使用无头模式获取 RGB 图像数据
-frame = env.render(mode='rgb_array')
 
-# 显示图像（可选）
-plt.imshow(frame)
-plt.axis('off')  # 关闭坐标轴
-plt.show()
+def get_keys(h5file):
+    keys = []
 
-# 保存图像为文件
-plt.imsave('./imgs/antmaze_large.png', frame, dpi=300)
+    def visitor(name, item):
+        if isinstance(item, h5py.Dataset):
+            keys.append(name)
 
-# 关闭环境
-env.close()
+    h5file.visititems(visitor)
+    return keys
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dir", default="./logs")
+    parser.add_argument("--policy", default="IQL", help='policy to use')
+    parser.add_argument("--env", default="halfcheetah-kinematic-footjnt")
+    parser.add_argument('--srctype', default="expert", help='dataset type used in the source domain') # only useful when source domain is offline
+    parser.add_argument('--shift_level', default="hard", help='the scale of the dynamics shift. Note that this value varies on different settins')
+    # support dataset type:
+    # source domain: all valid datasets from D4RL
+    # target domain: random, medium, medium-expert, expert
+    parser.add_argument('--mode', default=0, type=int, help='the training mode, there are four types, 0: online-online, 1: offline-online, 2: online-offline, 3: offline-offline')
+    parser.add_argument("--seed", default=100, type=int)
+    parser.add_argument("--save_model", default=True, type=bool)        # Save model and optimizer parameters
+    parser.add_argument('--tar_env_interact_interval', help='interval of interacting with target env', default=10, type=int)
+    parser.add_argument('--max_step', default=int(1e6), type=int)  # the maximum gradient step for off-dynamics rl learning
+    parser.add_argument('--params', default=None, help='Hyperparameters for the adopted algorithm, ought to be in JSON format')
+    parser.add_argument('--device', default='cuda:0', type=str)
+    args = parser.parse_args()  
+    
+    #device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    
+    device = torch.device("cpu")
+    
+    # we support different ways of specifying tasks, e.g., hopper-friction, hopper_friction, hopper_morph_torso_easy, hopper-morph-torso-easy
+    if '_' in args.env:
+        args.env = args.env.replace('_', '-')
+    
+    if "halfcheetah" in args.env:
+        src_env = HalfCheetahEnv
+    elif "hopper" in args.env:
+        src_env = HopperEnv
+    elif "walker2d" in args.env:
+        src_env = Walker2dEnv
+    elif "ant" in args.env:
+        src_env = AntEnv
+    else:
+        raise NotImplementedError
+    
+    env_config_name = args.env.split("-")[0]
+    
+    src_eval_env = TimeLimit(
+                    src_env(xml_file=f"{str(Path(__file__).parent.absolute())}/envs/mujoco/assets/{args.env.replace('-', '_')}_{args.shift_level}.xml",),
+                    max_episode_steps=1000          
+                )
+    src_eval_env.seed(args.seed)
+    
+    ref_env_name = args.env + '-' + str(args.shift_level)
+    
+    
+    
+    policy_config_name = 'igdf'
+
+    # load pre-defined hyperparameter config for training
+    with open(f"{str(Path(__file__).parent.absolute())}/config/mujoco/{policy_config_name}/{env_config_name}.yaml", 'r', encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+    
+    if args.params is not None:
+        override_params = json.loads(args.params)
+        config.update(override_params)
+        print('The following parameters are updated to:', args.params)
+
+    
+    print("------------------------------------------------------------")
+    print("Policy: {}, Env: {}, Seed: {}".format(args.policy, args.env, args.seed))
+    print("------------------------------------------------------------")
+
+    # seed all
+    src_eval_env.action_space.seed(args.seed)
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.cuda.manual_seed_all(args.seed)
+    random.seed(args.seed)
+
+    # get necessary information from both domains
+    state_dim = src_eval_env.observation_space.shape[0]
+    action_dim = src_eval_env.action_space.shape[0] 
+    max_action = float(src_eval_env.action_space.high[0])
+    min_action = -max_action
+    
+
+    config.update({
+        'env_name': args.env,
+        'state_dim': state_dim,
+        'action_dim': action_dim,
+        'max_action': max_action,
+        'tar_env_interact_interval': int(args.tar_env_interact_interval),
+        'max_step': int(args.max_step),
+    })
+
+    from algo.offline.iql import IQL
+    
+    algo = IQL
+    policy = algo(config, device)
+    
+    policy.policy.load_state_dict(torch.load(f"./testlogs/IQL/percent/{env_config_name}/{args.srctype}/{args.seed}/models/model_actor", map_location=device))
+    
+    eval_return = eval_policy(policy, src_eval_env, eval_cnt=0)
+    
+    eval_normalized_score = get_normalized_score(eval_return, ref_env_name)
+    
+    print("eval_normalized_score:", eval_normalized_score)

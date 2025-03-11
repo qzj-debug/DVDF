@@ -1,0 +1,1 @@
+dynamics里面放了在target dataset预训练的dynamics model.都是10%数据的。

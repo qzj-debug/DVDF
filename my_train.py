@@ -58,6 +58,7 @@ if __name__ == "__main__":
     parser.add_argument('--params', default=None, help='Hyperparameters for the adopted algorithm, ought to be in JSON format')
     parser.add_argument('--device', default="cuda:0", type=str)
     parser.add_argument('--filter_alpha', default=0.8, type=float)
+    parser.add_argument('--filter_beta', default=0.5, type=float)
     args = parser.parse_args()
     
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")

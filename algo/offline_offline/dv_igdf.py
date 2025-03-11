@@ -511,13 +511,19 @@ class DV_IGDF(object):
             diagonal_elements = torch.diag(logits).reshape(-1, 1)
             src_info = diagonal_elements / (srcsa_repr * srcss_repr) # [128, 1]
             
-        q1, q2 = self.src_Q(src_state, src_action)
-        q = torch.min(q1, q2)
+        src_q1, src_q2 = self.src_Q(src_state, src_action)
+        src_q = torch.min(src_q1, src_q2)
         
-        src_adv = torch.exp(q - self.src_V(src_state))    # [batch, 1]
-        src_adv = src_adv / torch.linalg.norm(src_adv, dim=0, keepdim=True) #归一化，[batch, 1]
+        src_adv = src_q - self.src_V(src_state)    # [batch, 1]
+        cur_v = self.v_func(src_state)
+        cur_q1, cur_q2 = self.target_q_funcs(src_state, src_action)
+        cur_q = torch.min(cur_q1, cur_q2)
+        cur_adv = cur_q - cur_v
+        adv = torch.exp(self.config["filter_beta"] * src_adv + (1 - self.config["filter_beta"]) * cur_adv)
         
-        filter_info = self.config["filter_alpha"] * src_info + (1 - self.config["filter_alpha"]) * src_adv
+        adv = adv / torch.linalg.norm(adv, dim=0, keepdim=True) #归一化，[batch, 1]
+        
+        filter_info = self.config["filter_alpha"] * src_info + (1 - self.config["filter_alpha"]) * adv
         
         sorted_indices = torch.argsort(filter_info[:, 0])
         

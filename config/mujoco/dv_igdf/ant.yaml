@@ -39,5 +39,6 @@ importance_weight: 1.0
 xi: 0.75
 
 filter_alpha: 0.8
+filter_beta: 1.0
 
 save_freq: 5000
