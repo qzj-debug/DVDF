@@ -719,7 +719,7 @@ def soft_update(src_model: nn.Module, tar_model: nn.Module, tau: float) -> None:
     for param_src, param_tar in zip(src_model.parameters(), tar_model.parameters()):
         param_tar.data.copy_(tau * param_src.data + (1 - tau) * param_tar.data)
 
-def huber_loss(y_true, y_pred, delta=1.0):
+def huber_loss(y_true, y_pred, delta=30.0):  # 3, 10太小，50可以
     error = y_true - y_pred
     abs_error = torch.abs(error)
     
@@ -883,6 +883,9 @@ class Robust_IGDF(object):
         q_1, q_2 = self.q_funcs(state_batch, action_batch)
         if writer is not None and self.total_it % 5000 == 0:
             writer.add_scalar('train/q1', q_1.mean(), self.total_it)
+            
+        if self.total_it % 5000 == 0:
+            print(f"total it: {self.total_it}  q_1: {q_1.mean().item()}  value_target: {value_target.mean().item()}")
         
         # from IGDF code, use mask for weighting Q loss, using huber loss
         loss = (mask * huber_loss(value_target, q_1)).mean() + (mask * huber_loss(value_target, q_2)).mean()
@@ -936,8 +939,10 @@ class Robust_IGDF(object):
         dyna_pred_inf_next_s, min_indices = torch.min(dyna_pred_next_s, dim=0, keepdim=False) # [B,S]
         #计算penalty
         penalty = torch.zeros((2 * batch_size, 1)).to(self.device)
-        penalty[-sorted_num:batch_size] = self.config["penalty_coefficient"] * (self.v_func(penalty_src_next_state) - self.v_func(dyna_pred_inf_next_s))
+        penalty[-sorted_num:batch_size] = torch.clamp(self.config["penalty_coefficient"] * (self.v_func(penalty_src_next_state) - self.v_func(dyna_pred_inf_next_s)), min=0.0)
 
+        
+        
         # mask = torch.ones((batch_size - sorted_num, 1)).to(self.device)
         # mask[:-sorted_num] = info_temp
 

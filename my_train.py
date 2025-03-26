@@ -54,7 +54,7 @@ if __name__ == "__main__":
     parser.add_argument("--save-model", default=True, type=bool)        # Save model and optimizer parameters
     parser.add_argument('--tar_env_interact_interval', help='interval of interacting with target env', default=10, type=int)
     parser.add_argument('--max_step', default=int(1e6), type=int)  # the maximum gradient step for off-dynamics rl learning
-    parser.add_argument('--limited_size', default=False, type=bool)
+    parser.add_argument('--limited_size', default=True, type=bool)
     parser.add_argument('--params', default=None, help='Hyperparameters for the adopted algorithm, ought to be in JSON format')
     parser.add_argument('--device', default="cuda:0", type=str)
     parser.add_argument('--filter_alpha', default=0.8, type=float)
@@ -120,8 +120,8 @@ if __name__ == "__main__":
         
     #这里加入filter_alpha和src_Q_path, src_V_path
     config["filter_alpha"] = args.filter_alpha
-    config["src_Q_path"] = f"{str(Path(__file__).parent.absolute())}/logs/Offline/{args.env}/{args.srctype}/{args.seed}/models/model_critic"
-    config["src_V_path"] = f"{str(Path(__file__).parent.absolute())}/logs/Offline/{args.env}/{args.srctype}/{args.seed}/models/model_value"
+    config["src_Q_path"] = f"{str(Path(__file__).parent.absolute())}/logs/DMG/{args.env}/{args.srctype}/{args.seed}/models/model_critic"
+    config["src_V_path"] = f"{str(Path(__file__).parent.absolute())}/logs/DMG/{args.env}/{args.srctype}/{args.seed}/models/model_value"
     #self.q_funcs.load_state_dict(torch.load(filename + "_critic"))
     
 
