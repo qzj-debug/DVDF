@@ -730,7 +730,7 @@ def huber_loss(y_true, y_pred, delta=30.0):  # 3, 10太小，50可以
     return torch.mean(loss)
 
 
-class Robust_IGDF(object):
+class DROCO(object):
 
     def __init__(self,
                  config,
@@ -770,9 +770,9 @@ class Robust_IGDF(object):
         self.policy_lr_schedule = CosineAnnealingLR(self.policy_optimizer, config['max_step'])
 
 
-        self.info = ContrastiveInfo(config['state_dim'], config['action_dim'], config['repr_dim'], config['ensemble_size'],
-                                    config['repr_norm'], config['repr_norm_temp'], config['ortho_init'], config['output_gain'],).to(self.device)
-        self.info_optimizer = torch.optim.Adam(self.info.parameters(), lr=config['actor_lr'])
+        # self.info = ContrastiveInfo(config['state_dim'], config['action_dim'], config['repr_dim'], config['ensemble_size'],
+        #                             config['repr_norm'], config['repr_norm_temp'], config['ortho_init'], config['output_gain'],).to(self.device)
+        # self.info_optimizer = torch.optim.Adam(self.info.parameters(), lr=config['actor_lr'])
         
         
         # dynamics model
@@ -822,39 +822,39 @@ class Robust_IGDF(object):
         else:
             return action.squeeze().cpu().numpy()
     
-    def update_info(self, src_replay_buffer, tar_replay_buffer, batch_size, writer=None):
+    # def update_info(self, src_replay_buffer, tar_replay_buffer, batch_size, writer=None):
 
-        info_step = 0
+    #     info_step = 0
 
-        for train_step in trange(self.config['info_update_step'], desc="Training"):
-            info_step += 1
-            tar_s, tar_a, tar_ss, _, _ = tar_replay_buffer.sample(batch_size) 
-            _, _, src_ss, _, _ = src_replay_buffer.sample(batch_size - 1) # src_ss = [127, state_dim]
+    #     for train_step in trange(self.config['info_update_step'], desc="Training"):
+    #         info_step += 1
+    #         tar_s, tar_a, tar_ss, _, _ = tar_replay_buffer.sample(batch_size) 
+    #         _, _, src_ss, _, _ = src_replay_buffer.sample(batch_size - 1) # src_ss = [127, state_dim]
             
-            tar_s = tar_s.unsqueeze(1) # [128, 1, state_dim]
-            tar_a = tar_a.unsqueeze(1) # [128, 1, action_dim]
-            tar_ss = tar_ss.unsqueeze(1) # [128, 1, state_dim]
-            src_ss = src_ss.unsqueeze(0) # [1, 127, state_dim]
-            src_ss = src_ss.expand(batch_size, -1, -1) # [128, 127, state_dim]
-            ss = torch.cat((tar_ss, src_ss), dim = 1) # [128, 128, state_dim]
+    #         tar_s = tar_s.unsqueeze(1) # [128, 1, state_dim]
+    #         tar_a = tar_a.unsqueeze(1) # [128, 1, action_dim]
+    #         tar_ss = tar_ss.unsqueeze(1) # [128, 1, state_dim]
+    #         src_ss = src_ss.unsqueeze(0) # [1, 127, state_dim]
+    #         src_ss = src_ss.expand(batch_size, -1, -1) # [128, 127, state_dim]
+    #         ss = torch.cat((tar_ss, src_ss), dim = 1) # [128, 128, state_dim]
 
-            logits = self.info(tar_s, tar_a, ss) # [128, 1, 128]
-            logits = logits.squeeze(1)
-            matrix = torch.zeros((batch_size, batch_size), dtype = torch.float32, device = self.device)
-            matrix[:, 0] = 1
+    #         logits = self.info(tar_s, tar_a, ss) # [128, 1, 128]
+    #         logits = logits.squeeze(1)
+    #         matrix = torch.zeros((batch_size, batch_size), dtype = torch.float32, device = self.device)
+    #         matrix[:, 0] = 1
             
-            info_loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, matrix)
-            info_loss = torch.mean(info_loss)
+    #         info_loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, matrix)
+    #         info_loss = torch.mean(info_loss)
 
-            if writer is not None and info_step % 100 == 0:
-                writer.add_scalar('train/info loss', info_loss, info_step)
+    #         if writer is not None and info_step % 100 == 0:
+    #             writer.add_scalar('train/info loss', info_loss, info_step)
                 
-            if writer is None:
-                print('train/info loss', info_loss, info_step)
+    #         if writer is None:
+    #             print('train/info loss', info_loss, info_step)
 
-            self.info_optimizer.zero_grad()
-            info_loss.backward()
-            self.info_optimizer.step()
+    #         self.info_optimizer.zero_grad()
+    #         info_loss.backward()
+    #         self.info_optimizer.step()
 
     def update_target(self):
         """moving average update of target networks"""
@@ -875,7 +875,7 @@ class Robust_IGDF(object):
         v_loss = asymmetric_l2_loss(adv, self.lam)
         return v_loss, adv
 
-    def update_q_functions(self, state_batch, action_batch, reward_batch, nextstate_batch, not_done_batch, mask, penalty, writer=None):
+    def update_q_functions(self, state_batch, action_batch, reward_batch, nextstate_batch, not_done_batch, penalty, writer=None):
         with torch.no_grad():
             v_t = self.v_func(nextstate_batch)
             value_target = reward_batch + not_done_batch * self.discount * (v_t - penalty)
@@ -888,7 +888,7 @@ class Robust_IGDF(object):
             print(f"total it: {self.total_it}  q_1: {q_1.mean().item()}  value_target: {value_target.mean().item()}")
         
         # from IGDF code, use mask for weighting Q loss, using huber loss
-        loss = (mask * huber_loss(value_target, q_1)).mean() + (mask * huber_loss(value_target, q_2)).mean()
+        loss = (huber_loss(value_target, q_1, delta=self.config["huber_delta"])).mean() + (huber_loss(value_target, q_2, delta=self.config["huber_delta"])).mean()
         return loss
 
     def update_policy(self, advantage_batch, state_batch, action_batch):
@@ -906,40 +906,40 @@ class Robust_IGDF(object):
         
 
         # perform data filtering
-        if self.config['repr_norm']:
-            logits = self.info(src_state, src_action, src_next_state)
-            diagonal_elements = torch.diag(logits).reshape(-1, 1)
-            src_info = diagonal_elements
-        else:
-            logits, srcsa_repr, srcss_repr = self.info(src_state, src_action, src_next_state, return_repr = True)
-            srcsa_repr = torch.linalg.norm(srcsa_repr, dim=-1, keepdim=True)  # [128, 1]
-            srcss_repr = torch.linalg.norm(srcss_repr, dim=-1, keepdim=True)  # [128, 1]
-            diagonal_elements = torch.diag(logits).reshape(-1, 1)
-            src_info = diagonal_elements / (srcsa_repr * srcss_repr) # [128, 1]
-        sorted_indices = torch.argsort(src_info[:, 0])
+        # if self.config['repr_norm']:
+        #     logits = self.info(src_state, src_action, src_next_state)
+        #     diagonal_elements = torch.diag(logits).reshape(-1, 1)
+        #     src_info = diagonal_elements
+        # else:
+        #     logits, srcsa_repr, srcss_repr = self.info(src_state, src_action, src_next_state, return_repr = True)
+        #     srcsa_repr = torch.linalg.norm(srcsa_repr, dim=-1, keepdim=True)  # [128, 1]
+        #     srcss_repr = torch.linalg.norm(srcss_repr, dim=-1, keepdim=True)  # [128, 1]
+        #     diagonal_elements = torch.diag(logits).reshape(-1, 1)
+        #     src_info = diagonal_elements / (srcsa_repr * srcss_repr) # [128, 1]
+        # sorted_indices = torch.argsort(src_info[:, 0])
 
-        sorted_num = - int(batch_size * float(self.config['xi']))
-        top_half_indices = sorted_indices[sorted_num:]
-        penaly_half_indices = sorted_indices[:sorted_num]
+        # sorted_num = - int(batch_size * float(self.config['xi']))
+        # top_half_indices = sorted_indices[sorted_num:]
+        # penaly_half_indices = sorted_indices[:sorted_num]
         
-        penalty_src_state = src_state[penaly_half_indices]
-        penalty_src_action = src_action[penaly_half_indices]
-        penalty_src_next_state = src_next_state[penaly_half_indices]
+        # penalty_src_state = src_state[penaly_half_indices]
+        # penalty_src_action = src_action[penaly_half_indices]
+        # penalty_src_next_state = src_next_state[penaly_half_indices]
 
-        info_temp = torch.exp(src_info[top_half_indices] * self.config['importance_weight'])
+        # info_temp = torch.exp(src_info[top_half_indices] * self.config['importance_weight'])
         
-        mask = torch.ones((2 * batch_size, 1)).to(self.device)
-        mask[:-sorted_num] = info_temp
+        # mask = torch.ones((2 * batch_size, 1)).to(self.device)
+        # mask[:-sorted_num] = info_temp
         
         #获取动态模型输出的next_state
-        dyna_pred_mean, dyna_pred_var = self.dynamics.predict(inputs=torch.cat([penalty_src_state, penalty_src_action], dim=-1), factor_ensemble=True)   # [ensemble_size, batch_size, 1 + |S|]
+        dyna_pred_mean, dyna_pred_var = self.dynamics.predict(inputs=torch.cat([src_state, src_action], dim=-1), factor_ensemble=True)   # [ensemble_size, batch_size, 1 + |S|]
         dyna_pred_samples               =   dyna_pred_mean + torch.ones_like(dyna_pred_var, device=self.device) * dyna_pred_var
         _, dyna_pred_delta_s  =   dyna_pred_samples[:, :, :1], dyna_pred_samples[:, :, 1:]
-        dyna_pred_next_s                =   penalty_src_state + dyna_pred_delta_s # [E, B, S]
+        dyna_pred_next_s                =   src_state + dyna_pred_delta_s # [E, B, S]
         dyna_pred_inf_next_s, min_indices = torch.min(dyna_pred_next_s, dim=0, keepdim=False) # [B,S]
         #计算penalty
         penalty = torch.zeros((2 * batch_size, 1)).to(self.device)
-        penalty[-sorted_num:batch_size] = torch.clamp(self.config["penalty_coefficient"] * (self.v_func(penalty_src_next_state) - self.v_func(dyna_pred_inf_next_s)), min=0.0)
+        penalty[:batch_size] = torch.clamp(self.config["penalty_coefficient"] * (self.v_func(src_next_state) - self.v_func(dyna_pred_inf_next_s)), min=0.0)
 
         
         
@@ -957,7 +957,7 @@ class Robust_IGDF(object):
         v_loss_step.backward()
         self.v_optimizer.step()
 
-        q_loss_step = self.update_q_functions(state, action, reward, next_state, not_done, mask, penalty, writer)
+        q_loss_step = self.update_q_functions(state, action, reward, next_state, not_done, penalty, writer)
 
         self.q_optimizer.zero_grad()
         q_loss_step.backward()

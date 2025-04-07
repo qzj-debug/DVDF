@@ -48,7 +48,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dynamics_dir", default="./dynamics")
     parser.add_argument("--dir", default="./logs")
-    parser.add_argument("--algo", default="Robust_IGDF", help='policy to use')
+    parser.add_argument("--algo", default="DROCO", help='policy to use')
     parser.add_argument("--env", default="halfcheetah-kinematic") # support 
     parser.add_argument('--srctype', default="medium", help='dataset type used in the source domain') # only useful when source domain is offline
     parser.add_argument("--seed", default=100, type=int)
@@ -59,6 +59,8 @@ if __name__ == "__main__":
     parser.add_argument('--params', default=None, help='Hyperparameters for the adopted algorithm, ought to be in JSON format')
     parser.add_argument('--device', default="cuda:0", type=str)
     parser.add_argument('--filter_alpha', default=0.8, type=float)
+    parser.add_argument('--penalty_coefficient', default=1.0, type=float)
+    parser.add_argument('--huber_delta', default=50, type=float)
     args = parser.parse_args()
     
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
@@ -129,7 +131,10 @@ if __name__ == "__main__":
     print("Policy: {}, Env: {}, Seed: {}".format(args.algo, args.env + "-" + args.srctype, args.seed))
     print("------------------------------------------------------------")   
     
-    outdir = args.dir + '/' + args.algo + '/' + args.env + '/' + args.srctype  + '/' + str(args.seed)
+    outdir = args.dir + '/' + args.env + '/' + args.srctype  + '/' + str(args.seed)
+    if not os.path.exists(outdir):
+        os.makedirs(outdir)
+    
 
     if args.save_model and not os.path.exists("{}/models".format(outdir)):
         os.makedirs("{}/models".format(outdir))
@@ -157,6 +162,8 @@ if __name__ == "__main__":
         'max_action': max_action,
         'tar_env_interact_interval': int(args.tar_env_interact_interval),
         'max_step': int(args.max_step),
+        'penalty_coefficient': args.penalty_coefficient,
+        'huber_delta': args.huber_delta,
     })
 
     policy = call_algo(args.algo, config, 3, device)
@@ -187,7 +194,7 @@ if __name__ == "__main__":
     
     
     #如果是robust类型的算法的话，并且dynamics model没有保存，就先训练dynamics model
-    if "Robust" in args.algo and not os.path.exists(dynamics_dir + "/model_dynamics"):
+    if "DROCO" in args.algo and not os.path.exists(dynamics_dir + "/model_dynamics"):
         for t in range(int(config['model_epochs'])):
             policy.train_model(tar_replay_buffer,  current_step=0)
             policy.save_dynamics(f"{dynamics_dir}/model")

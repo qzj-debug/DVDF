@@ -275,7 +275,7 @@ class DARA(object):
             sas_probs, sa_probs = F.softmax(sas_logits, -1), F.softmax(sa_logits, -1)
             sas_log_probs, sa_log_probs = torch.log(sas_probs + 1e-10), torch.log(sa_probs + 1e-10)
             reward_penalty = sas_log_probs[:, 1:] - sa_log_probs[:, 1:] - sas_log_probs[:, :1] + sa_log_probs[:,:1]
-            # clip the panlty based on the DARA paper
+            # clip the panlty based on the DARA paper 这里也用到了reward penalty
             reward_penalty = reward_penalty.clamp(-10, 10)
 
             if writer is not None and self.total_it % 5000 == 0:
