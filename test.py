@@ -1,4 +1,4 @@
-#探究对dynamics shift的抵抗能力，用在clean环境上训练的IQL加入dynamics shift测试鲁棒性。
+#先把target dataset固定下来，以免不匹配。
 import numpy as np
 import torch
 import gym
@@ -8,46 +8,67 @@ import random
 import math
 import time
 import copy
+from pathlib import Path
 import yaml
-import json # in case the user want to modify the hyperparameters
-import d4rl # used to make offline environments for source domains
-import d4rl
-import algo.utils as utils
 import h5py
+
+import algo.utils as utils
+
+import ott
+import d4rl
+import scipy as sp
+
+import jax.numpy as jnp
+import numpy as np
+import jax
 from tqdm import tqdm
-from pathlib                              import Path
-from algo.call_algo                       import call_algo
-from dataset.call_dataset                 import call_tar_dataset
-from envs.mujoco.call_mujoco_env          import call_mujoco_env
-from envs.adroit.call_adroit_env          import call_adroit_env
-from envs.antmaze.call_antmaze_env        import call_antmaze_env
-from envs.infos                           import get_normalized_score
+import matplotlib.pyplot as plt
+import torch.nn as nn
 
-from gym.envs.mujoco.half_cheetah_v3    import  HalfCheetahEnv
-from gym.envs.mujoco.ant_v3             import  AntEnv
-from gym.envs.mujoco.walker2d_v3        import  Walker2dEnv
-from gym.envs.mujoco.hopper_v3          import  HopperEnv
+import seaborn as sns
 
-from gym.wrappers.time_limit            import  TimeLimit
+sns.set_style("white")
 
+#plt.style.use('seaborn-white')
+plt.rcParams['font.sans-serif'] = ['SimHei']
+plt.rcParams['axes.unicode_minus'] = False
+#plt.rcParams['font.family'] = 'Times New Roman'
+#plt.rcParams['font.size'] = 15
 
-def eval_policy(policy, env, eval_episodes=10, eval_cnt=None):
-    eval_env = env
+class MLPNetwork(nn.Module):
+    
+    def __init__(self, input_dim, output_dim, hidden_size=256):
+        super(MLPNetwork, self).__init__()
+        self.network = nn.Sequential(
+                        nn.Linear(input_dim, hidden_size),
+                        nn.ReLU(),
+                        nn.Linear(hidden_size, hidden_size),
+                        nn.ReLU(),
+                        nn.Linear(hidden_size, output_dim),
+                        )
+    
+    def forward(self, x):
+        return self.network(x)
+    
+class DoubleQFunc(nn.Module):
+    
+    def __init__(self, state_dim, action_dim, hidden_size=256):
+        super(DoubleQFunc, self).__init__()
+        self.network1 = MLPNetwork(state_dim + action_dim, 1, hidden_size)
+        self.network2 = MLPNetwork(state_dim + action_dim, 1, hidden_size)
 
-    avg_reward = 0.
-    for episode_idx in range(eval_episodes):
-        state, done = eval_env.reset(), False
-        while not done:
-            action = policy.select_action(np.array(state))
-            next_state, reward, done, _ = eval_env.step(action)
+    def forward(self, state, action):
+        x = torch.cat((state, action), dim=1)
+        return self.network1(x), self.network2(x)
 
-            avg_reward += reward
-            state = next_state
-    avg_reward /= eval_episodes
+class ValueFunc(nn.Module):
+    
+    def __init__(self, state_dim, action_dim, hidden_size=256):
+        super(ValueFunc, self).__init__()
+        self.network = MLPNetwork(state_dim, 1, hidden_size)
 
-    print("[{}] Evaluation over {} episodes: {}".format(eval_cnt, eval_episodes, avg_reward))
-
-    return avg_reward
+    def forward(self, state):
+        return self.network(state)
 
 
 def get_keys(h5file):
@@ -60,107 +81,152 @@ def get_keys(h5file):
     h5file.visititems(visitor)
     return keys
 
+def solve_ot(
+    src_data, tar_data, cost_type='cosine'
+):
+    src_B = src_data.shape[0]
+    tgt_B = tar_data.shape[0]
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dir", default="./logs")
-    parser.add_argument("--policy", default="IQL", help='policy to use')
-    parser.add_argument("--env", default="halfcheetah-kinematic-footjnt")
-    parser.add_argument('--srctype', default="expert", help='dataset type used in the source domain') # only useful when source domain is offline
-    parser.add_argument('--shift_level', default="hard", help='the scale of the dynamics shift. Note that this value varies on different settins')
-    # support dataset type:
-    # source domain: all valid datasets from D4RL
-    # target domain: random, medium, medium-expert, expert
-    parser.add_argument('--mode', default=0, type=int, help='the training mode, there are four types, 0: online-online, 1: offline-online, 2: online-offline, 3: offline-offline')
-    parser.add_argument("--seed", default=100, type=int)
-    parser.add_argument("--save_model", default=True, type=bool)        # Save model and optimizer parameters
-    parser.add_argument('--tar_env_interact_interval', help='interval of interacting with target env', default=10, type=int)
-    parser.add_argument('--max_step', default=int(1e6), type=int)  # the maximum gradient step for off-dynamics rl learning
-    parser.add_argument('--params', default=None, help='Hyperparameters for the adopted algorithm, ought to be in JSON format')
-    parser.add_argument('--device', default='cuda:0', type=str)
-    args = parser.parse_args()  
-    
-    #device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    
-    device = torch.device("cpu")
-    
-    # we support different ways of specifying tasks, e.g., hopper-friction, hopper_friction, hopper_morph_torso_easy, hopper-morph-torso-easy
-    if '_' in args.env:
-        args.env = args.env.replace('_', '-')
-    
-    if "halfcheetah" in args.env:
-        src_env = HalfCheetahEnv
-    elif "hopper" in args.env:
-        src_env = HopperEnv
-    elif "walker2d" in args.env:
-        src_env = Walker2dEnv
-    elif "ant" in args.env:
-        src_env = AntEnv
+    src_embs = jnp.array(src_data.reshape(src_B, -1), dtype=jnp.float16)  # (batch_size1 + batch_size2, dim)
+    tgt_embs = jnp.array(tar_data.reshape(tgt_B, -1), dtype=jnp.float16)  # (batch_size1 + batch_size2, dim)
+
+    if cost_type == 'euclidean':
+        cost_fn = ott.geometry.costs.Euclidean()
+    elif cost_type == 'cosine':
+        cost_fn = ott.geometry.costs.Cosine()
     else:
         raise NotImplementedError
-    
-    env_config_name = args.env.split("-")[0]
-    
-    src_eval_env = TimeLimit(
-                    src_env(xml_file=f"{str(Path(__file__).parent.absolute())}/envs/mujoco/assets/{args.env.replace('-', '_')}_{args.shift_level}.xml",),
-                    max_episode_steps=1000          
-                )
-    src_eval_env.seed(args.seed)
-    
-    ref_env_name = args.env + '-' + str(args.shift_level)
-    
-    
-    
-    policy_config_name = 'igdf'
 
-    # load pre-defined hyperparameter config for training
-    with open(f"{str(Path(__file__).parent.absolute())}/config/mujoco/{policy_config_name}/{env_config_name}.yaml", 'r', encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    
-    if args.params is not None:
-        override_params = json.loads(args.params)
-        config.update(override_params)
-        print('The following parameters are updated to:', args.params)
+    scale_cost = 'max_cost'
+    geom = ott.geometry.pointcloud.PointCloud(src_embs, tgt_embs, cost_fn=cost_fn, scale_cost=scale_cost)
 
+    solver = ott.solvers.linear.sinkhorn.Sinkhorn(threshold=1e-9, max_iterations=100)
+    prob = ott.problems.linear.linear_problem.LinearProblem(geom)
+    sinkhorn_output = solver(prob)
     
-    print("------------------------------------------------------------")
-    print("Policy: {}, Env: {}, Seed: {}".format(args.policy, args.env, args.seed))
-    print("------------------------------------------------------------")
+    coupling_matrix = geom.transport_from_potentials(
+        sinkhorn_output.f, sinkhorn_output.g
+    )
+    cost_matrix = cost_fn.all_pairs(src_embs, tgt_embs)
+    ot_costs = jnp.einsum('ij,ij->i', coupling_matrix, cost_matrix)
 
-    # seed all
-    src_eval_env.action_space.seed(args.seed)
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    torch.cuda.manual_seed_all(args.seed)
-    random.seed(args.seed)
+    return -ot_costs
 
-    # get necessary information from both domains
-    state_dim = src_eval_env.observation_space.shape[0]
-    action_dim = src_eval_env.action_space.shape[0] 
-    max_action = float(src_eval_env.action_space.high[0])
-    min_action = -max_action
+def filter_dataset(src_replay_buffer, tar_replay_buffer, cost_type='cosine'):
+    src_num = src_replay_buffer.state.shape[0]
+    srcdata = np.hstack([src_replay_buffer.state, src_replay_buffer.action, src_replay_buffer.next_state])
+
+    tar_num = tar_replay_buffer.state.shape[0]
+    tardata = np.hstack([tar_replay_buffer.state, tar_replay_buffer.action, tar_replay_buffer.next_state])
+
+    cost_result = []
+
+    batch_solve = jax.jit(solve_ot)
+
+    iter_time = src_num // 10000 + 1
+
+    for i in range(iter_time):
+        current_time = time.time()
+        if 10000*i >= src_num:
+            break
+        Gs = batch_solve(srcdata[10000*i:10000*(i+1)], tardata)
+
+        part_res = jax.device_get(Gs)
+        part_res = part_res.tolist()
+
+        cost_result = cost_result + part_res
+
+        print('Have completed {} transitions'.format(10000*(i+1)))
+    
+    cost_result = np.array(cost_result)
+
+    return cost_result
+
+def plot_result():
+    # 示例数据
+    plt.figure(figsize=(6, 6))
+    algos = ['IGDF', 'DVDF']
+    scores = [39, 67]
+
+    # 使用Matplotlib
+    #plt.bar(algos, scores, color='skyblue', edgecolor='black')
+    #plt.title('Basic Bar Chart')
+    #plt.xlabel('Normalized Score')
+    plt.ylabel('Normalized Score', fontsize=20)
+    #plt.show()
+    
+    error = [[6, 7],[4,6]]
+    colors = ['orange', 'cornflowerblue']
+    # 绘制
+    plt.bar(algos, scores, capsize=4, yerr=error, color=colors, width=1)
+    # 添加标题和标签
+    #plt.title('CQL')
+    plt.ylim(0,100)
+    #plt.xlabel('Algo')
+    plt.gca().spines['top'].set_visible(False)
+    plt.gca().spines['right'].set_visible(False)
+    plt.xticks(fontsize=20)
+    plt.yticks(fontsize=20)
+    
+    #plt.subplots_adjust(left=0.1, right=0.95, top=0.9, bottom=0.06)
+    plt.subplots_adjust(left=0.2)
+    plt.savefig(f"{str(Path(__file__).parent.absolute())}/imgs/performance.pdf")
+    
     
 
-    config.update({
-        'env_name': args.env,
-        'state_dim': state_dim,
-        'action_dim': action_dim,
-        'max_action': max_action,
-        'tar_env_interact_interval': int(args.tar_env_interact_interval),
-        'max_step': int(args.max_step),
-    })
+def plot(reduced_samples):
+    plt.figure(figsize=(8, 6))
+    
+    plt.scatter(reduced_samples[:5000, 0], reduced_samples[:5000, 1], color='blue', label='expert', s=10)
+    plt.scatter(reduced_samples[5000:, 0], reduced_samples[5000:, 1], color='red', label='random', s=10)
+    plt.legend()
+    
+    # 添加标题和坐标轴标签
+    plt.title('Src and Tar Points')
+    plt.xlabel('X-axis')
+    plt.ylabel('Y-axis')
+    
+    
 
-    from algo.offline.iql import IQL
+    # 显示图形
+    plt.savefig(f"{str(Path(__file__).parent.absolute())}/imgs/src_tar.png")
     
-    algo = IQL
-    policy = algo(config, device)
+
+def plot_filter(reduced_samples, src_indices, tar_indices, filter_indices):
+    plt.figure(figsize=(6, 6))
+    #绘制过滤掉的点
+    plt.scatter(reduced_samples[filter_indices, 0], reduced_samples[filter_indices, 1], color='gray', label='filtered', s=10)
+
+    # 绘制 positive_list 的蓝点
+    plt.scatter(reduced_samples[src_indices, 0], reduced_samples[src_indices, 1], color='blue', label='expert', s=10)
+
+    # 绘制 negative_list 的红点
+    plt.scatter(reduced_samples[tar_indices, 0], reduced_samples[tar_indices, 1], color='red', label='random', s=10)
+
+    # 添加图例
+    plt.legend(fontsize=14, loc='upper left')
     
-    policy.policy.load_state_dict(torch.load(f"./testlogs/IQL/percent/{env_config_name}/{args.srctype}/{args.seed}/models/model_actor", map_location=device))
-    
-    eval_return = eval_policy(policy, src_eval_env, eval_cnt=0)
-    
-    eval_normalized_score = get_normalized_score(eval_return, ref_env_name)
-    
-    print("eval_normalized_score:", eval_normalized_score)
+    plt.tick_params(
+        axis='both',          # 同时应用于x和y轴
+        which='both',         # 同时应用于主刻度和次刻度
+        # bottom=True,          # 保留底部边框
+        # top=False,            # 移除顶部边框
+        # left=True,            # 保留左侧边框
+        # right=False,          # 移除右侧边框
+        labelbottom=False,    # 移除底部标签
+        labelleft=False,      # 移除左侧标签
+        length=0             # 设置刻度线长度为0（不显示刻度线）
+    )
+
+    # 添加标题和坐标轴标签
+    # plt.title('Src and Tar Points')
+    # plt.xlabel('X-axis')
+    # plt.ylabel('Y-axis')
+
+    # 显示图形
+    plt.savefig(f"{str(Path(__file__).parent.absolute())}/imgs/src_tar_filter.pdf")
+
+
+if __name__ == "__main__":
+
+    plot_result()
