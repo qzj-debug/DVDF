@@ -72,12 +72,14 @@ if __name__ == "__main__":
     parser.add_argument('--filter_alpha', default=0.8, type=float)
     parser.add_argument('--filter_beta', default=0.5, type=float)
     parser.add_argument("--xi", default=0.75, type=float)
+    parser.add_argument("--target_ratio", default=0.1, type=float)
     args = parser.parse_args()
     
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     
     project = "DVDF"
-    group = f"xi_{args.xi}"
+    #group = f"xi_{args.xi}"
+    group = f"target_size_50000"
     name = f"{args.env}-{args.srctype}-{args.seed}"
     tag = f"{args.env}-{args.srctype}"
     
@@ -139,7 +141,7 @@ if __name__ == "__main__":
         size = 5000
     else:
         #采样10%的样本
-        size = int(tar_dataset["observations"].shape[0] * 0.1)
+        size = int(tar_dataset["observations"].shape[0] * args.target_ratio)
 
     ind = np.random.randint(0, tar_dataset["observations"].shape[0], size=size)
     
