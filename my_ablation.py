@@ -79,7 +79,7 @@ if __name__ == "__main__":
     
     project = "DVDF"
     #group = f"xi_{args.xi}"
-    group = f"target_size_50000"
+    group = f"target_ratio_{args.target_ratio}"
     name = f"{args.env}-{args.srctype}-{args.seed}"
     tag = f"{args.env}-{args.srctype}"
     
@@ -93,10 +93,6 @@ if __name__ == "__main__":
             run.delete()
     else:
         print("no need to delete")
-    
-    api = wandb.Api()
-    for run in api.runs("DVDF", filters={"display_name": f"{args.env}-{args.srctype}-{args.seed}", "group": group}):
-        run.delete()
     
     wandb_init(
         config={
